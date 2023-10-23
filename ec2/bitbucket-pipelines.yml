@@ -1,0 +1,89 @@
+# This is a sample build configuration for JavaScript.
+# Check our guides at https://confluence.atlassian.com/x/14UWN for more examples.
+# Only use spaces to indent your .yml configuration.
+# -----
+# You can specify a custom docker image from Docker Hub as your build environment.
+image: node:16.13.0-alpine
+
+options:
+  max-time: 10
+
+definitions:
+  services:
+    docker:
+      memory: 2048
+  steps:
+    - step: &build_image
+        name: Build image
+        services:
+          - docker
+        caches:
+          - docker
+        script:
+          - apk add --no-cache git openssh-client
+          - export STAGE=$(if [ $BITBUCKET_BRANCH == "master" ]; then echo "prod"; elif [ $BITBUCKET_BRANCH == "staging" ]; then echo "stag"; else echo "dev"; fi;); echo "Current stage is $STAGE";
+          - export DOCKER_IMAGE=$DOCKER_REGISTRY_USER/$BITBUCKET_REPO_SLUG-$STAGE
+          - export CONFIG_PATH=ec2-config
+
+          - git clone git@bitbucket.org:devsam1911/$CONFIG_PATH.git
+          - cp $CONFIG_PATH/$BITBUCKET_REPO_SLUG/.env.$STAGE .env
+          - rm -rf $CONFIG_PATH
+
+          - docker login -u $DOCKER_REGISTRY_USER -p $DOCKER_REGISTRY_PASSWORD
+          - docker build -t $DOCKER_IMAGE .
+          - docker push $DOCKER_IMAGE
+
+    - step: &deploy
+        name: Deploy to server
+        script:
+          - apk add --no-cache git openssh-client
+          - export STAGE=$(if [ $BITBUCKET_BRANCH == "master" ]; then echo "prod"; elif [ $BITBUCKET_BRANCH == "staging" ]; then echo "stag"; else echo "dev"; fi;); echo "Current stage is $STAGE";
+          - export DOCKER_IMAGE=$DOCKER_REGISTRY_USER/$BITBUCKET_REPO_SLUG-$STAGE
+          - export DOCKER_CONTAINER=$BITBUCKET_REPO_SLUG-$STAGE
+          - export CONFIG_PATH=ec2-config
+
+          - git clone git@bitbucket.org:devsam1911/$CONFIG_PATH.git
+          - ssh $REMOTE_USER@$REMOTE_ADDRESS "if [[ ! -e ~/$BITBUCKET_REPO_SLUG ]]; then mkdir ~/$BITBUCKET_REPO_SLUG; fi && exit;"
+          - scp $CONFIG_PATH/$BITBUCKET_REPO_SLUG/.env.$STAGE $REMOTE_USER@$REMOTE_ADDRESS:~/$BITBUCKET_REPO_SLUG
+          - rm -rf $CONFIG_PATH
+
+          - ssh $REMOTE_USER@$REMOTE_ADDRESS "
+            docker login -u $DOCKER_REGISTRY_USER -p $DOCKER_REGISTRY_PASSWORD &&
+            docker pull $DOCKER_IMAGE &&
+            (docker network ls|grep webnet >/dev/null 2>&1 || docker network create --driver bridge webnet) &&
+            docker run -i --network=webnet --env-file ~/$BITBUCKET_REPO_SLUG/.env.$STAGE $DOCKER_IMAGE ./migration-deployment.sh &&
+            (docker stop $DOCKER_CONTAINER || true) && (docker rm $DOCKER_CONTAINER || true) &&
+            docker run -d --name $DOCKER_CONTAINER -v /home/ubuntu/logs:/app/logs --env-file ~/$BITBUCKET_REPO_SLUG/.env.$STAGE --expose 3000 --expose 3001 --expose 4000 --restart=always --log-opt max-size=10m --network=webnet $DOCKER_IMAGE &&
+            docker system prune -f &&
+            rm ~/$BITBUCKET_REPO_SLUG/.env.$STAGE &&
+            exit;"
+          - ssh $REMOTE_USER@$REMOTE_ADDRESS "docker exec -i $DOCKER_CONTAINER ./healthcheck-pipeline.sh && exit;"
+
+pipelines:
+  branches:
+    dev:
+      - step:
+          name: Build image for develop
+          <<: *build_image
+      - step:
+          name: Deploy to develop
+          deployment: development
+          trigger: manual
+          <<: *deploy
+    staging:
+      - step:
+          name: Build image for staging
+          <<: *build_image
+      - step:
+          name: Deploy to staging
+          deployment: staging
+          <<: *deploy
+    master:
+      - step:
+          name: Build image for production
+          <<: *build_image
+      - step:
+          name: Deploy to production
+          deployment: production
+          trigger: manual
+          <<: *deploy

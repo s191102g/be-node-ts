@@ -1,0 +1,11 @@
+version: '3.1'
+services:
+ bull-mq:
+  image: bull-mq:latest
+  container_name: bull-mq
+  networks:
+   - webnet
+networks:
+    webnet:
+        name: webnet
+        driver: bridge

@@ -1,0 +1,10 @@
+# Configuration
+ssl/*
+!ssl/.gitkeep
+config/**/*
+!config/.gitkeep
+
+# Others
+.idea
+.history
+.DS_Store
